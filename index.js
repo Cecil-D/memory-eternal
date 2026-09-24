@@ -30,6 +30,7 @@ import { migrateFromMarkdown, setAuditConfig, backupDb } from './lib/db.js'
 import { summarizeTurn, extractLastTurn, sliceNewEvents, sessionEvents, sessionEventApi, createCaptureHealth, resolveRoute, captureCard, captureUpdate, pickNeighbors } from './lib/capture.js'
 import { createApi, json, encodeBody } from './lib/api.js'
 import { appendCaptureLog, readCaptureLog, rotateCaptureLog } from './lib/capture-log.js'
+import { nodeBinary, childEnv } from './lib/node-bin.js'
 
 export const name = 'memory-eternal'
 export const inject = ['systemPrompt', 'settings']
@@ -729,16 +730,29 @@ export function apply(ctx, config) {
       import('./lib/watchdog.js')
         .then((m) => {
           const port = Number(cfg0.webPort) || 7999
+          // 用 nodeBinary() 而非 process.execPath：Electron 宿主下后者是 Electron
+          // 主程序，spawn 出来不会执行 watchdog.js（见 lib/node-bin.js）。
+          const bin = nodeBinary()
           const wd = spawn(
-            process.execPath,
+            bin,
             [path.join(PACKAGE_ROOT, 'lib', 'watchdog.js'), '--port', String(port), '--interval', String(cfg0.webCheckIntervalMs || 5000), '--max-restart', String(cfg0.webMaxRestart || 10)],
-            { detached: true, stdio: 'ignore', env: { ...process.env, MEMORY_VAULT_DIR: vaultDir() }, windowsHide: true },
+            { detached: true, stdio: 'ignore', env: childEnv({ MEMORY_VAULT_DIR: vaultDir() }), windowsHide: true },
           )
+          // spawn 失败默认静默：既写 stderr，也进自动沉淀日志（面板可见）
+          wd.on('error', (error) => {
+            const why = `watchdog spawn 失败（${bin}）：${error?.message || error}`
+            console.error(`[memory-eternal] ${why}`)
+            logCapture('system', 'fail', why)
+          })
           wd.unref()
           watchdogProc = wd
-          console.error(`[memory-eternal] watchdog spawned pid=${wd.pid} port=${port}`)
+          console.error(`[memory-eternal] watchdog spawned pid=${wd.pid} bin=${bin} port=${port}`)
         })
-        .catch(() => {})
+        .catch((error) => {
+          const why = `watchdog 模块加载失败：${error?.message || error}`
+          console.error(`[memory-eternal] ${why}`)
+          logCapture('system', 'fail', why)
+        })
     }
 
     return () => {
